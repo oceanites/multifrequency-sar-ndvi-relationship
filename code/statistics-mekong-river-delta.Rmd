@@ -1,0 +1,1032 @@
+---
+jupyter:
+  jupytext:
+    formats: ipynb,Rmd
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.16.2
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+---
+
+<!-- #region -->
+# Mekong River Delta (Vietnam) study area
+
+
+## S1 processing
+
+* using SNAP and SNAP graph/processing pipeline
+* standard steps: Apply precise orbit, thermal noise removal, remove GRD border noise, calibration, terrain correction (DEM: 30m Copernicus global) 10m pixel spacing, subset to region, linear to dB conversion
+* calculation of RVI using `create-rvi-tif` python script (example run: `python3 ~/dev/2023_multifrequency/2024-10-14-create-rvi-tif.py --scale log --polarizations VH VV "data vietnam/data s1 vietnam/Subset_S1A_IW_GRDH_1SDV_20230808T224604_20230808T224629_049790_05FCD3_C933_Orb_NR_Cal_TC_dB.tif" "data vietnam/data s1 vietnam/Subset_S1A_IW_GRDH_1SDV_20230808T224604_20230808T224629_049790_05FCD3_C933_Orb_NR_Cal_TC_dB_RVI.tif"`)
+
+## SAOCOM processing
+* using SNAP and SNAP graph/processing pipeline
+* calculation of RVI using `create-rvi-tif` python script (example run: `python3 ~/dev/2023_multifrequency/2024-10-14-create-rvi-tif.py --scale log --polarizations HH HV "data vietnam/data saocom vietnam/Subset_S1A_OPER_SAR_EOSSP__CORE_L1A_OLF_20230309T204419_Cal_ML_SRGR_TC_dB_modified.tif" "data vietnam/data saocom vietnam/Subset_S1A_OPER_SAR_EOSSP__CORE_L1A_OLF_20230309T204419_Cal_ML_SRGR_TC_dB_modified_RVI.tif"`)
+
+
+## Cosmo SkyMed (CSK/CSG) processing
+* using SNAP and SNAP graph/processing pipeline
+* calculation of RVI using `create-rvi-tif` python script (example run: `python3 ~/dev/2023_multifrequency/2024-10-14-create-rvi-tif.py --scale log --polarizations HH HV "data vietnam/data csk csg vietnam/Subset_CSG_SSAR2_DGM_B_0101_STR_014_HH-HV-LIA_RA_R_20230603225718_20230603225724_1_F_11N_Z48_N00.h5_ML_TC_dB.tif" "data vietnam/data csk csg vietnam/Subset_CSG_SSAR2_DGM_B_0101_STR_014_HH-HV-LIA_RA_R_20230603225718_20230603225724_1_F_11N_Z48_N00.h5_ML_TC_dB_RVI.tif"`)
+* setting nodata value to 2 for RVI file (`gdal_edit.py -a_nodata 2 "data vietnam/data csk csg vietnam/Subset_CSG_SSAR2_DGM_B_0101_STR_014_HH-HV-LIA_RA_R_20230603225718_20230603225724_1_F_11N_Z48_N00.h5_ML_TC_dB_RVI.tif"`)
+
+
+## NovaSAR processing
+
+* SCD data provided by CSIRO
+* Terrain correction using SNAP graph
+* calibration to linear units using custom script `calibrate-novasar` (example: `python3 ~/dev/2023_multifrequency/2024-10-15-calibrate-novasar.py --input_file "./data vietnam/data novasar vietnam/NovaSAR_01_42627_scd_32_230305_030519_HH_HV_TC2.tif" --output_file "./data vietnam/data novasar vietnam/NovaSAR_01_42627_scd_32_230305_030519_HH_HV_TC2-linear.tif" --bands 0 1`)
+* RVI calculation (`python3 ~/dev/2023_multifrequency/2024-10-14-create-rvi-tif.py --scale linear --polarizations HH HV "./data vietnam/data novasar vietnam/NovaSAR_01_42627_scd_32_230305_030519_HH_HV_TC2-linear.tif" "./data vietnam/data novasar vietnam/NovaSAR_01_42627_scd_32_230305_030519_HH_HV_TC2-linear-RVI.tif"`)
+
+## Sentinel-2 processing/NDVI calculation
+
+* using custom methods in each notebook
+* masking using SCL layer
+<!-- #endregion -->
+
+# Python imports
+
+```{python}
+import geopandas as gpd
+import pandas as pd
+from datetime import date
+from pathlib import Path
+import numpy as np
+import zipfile
+import rasterio
+import rasterio.mask
+import matplotlib.pyplot as plt
+from rasterio.io import MemoryFile
+from tqdm import tqdm
+import seaborn as sns
+```
+
+```{python}
+from multifrequtils import (
+    scatterplot_nice, add_cr, compute_zonal_stats_rasterio_opened, get_filtered_pearsons_r,
+    open_s2_and_save_ndvi_img, resample_20m_to_10m,
+    read_s2_zip_scl,
+)
+```
+
+```{python}
+pd.set_option("display.max_rows", 10)
+pd.set_option("display.min_rows", 4)
+```
+
+# Definitions
+
+```{python}
+data_dir = Path("/run/media/tom/SSDThomas/scratch/2024-05-s-band-ndvi/")
+vietnam_data_dir = data_dir / "data vietnam"
+```
+
+```{python}
+s2_img_dir = vietnam_data_dir / "data s2 vietnam"
+s1_img_dir = vietnam_data_dir / "data s1 vietnam"
+novasar_img_dir = vietnam_data_dir / "data novasar vietnam"
+saocom_dir = vietnam_data_dir / "data saocom vietnam"
+csg_csk_dir = vietnam_data_dir / "data csk csg vietnam"
+vector_file_path = data_dir / 'fields-vietnam.geojson'
+```
+
+```{python}
+today_str = date.today().isoformat()
+fig_out_dir = data_dir / f"{today_str}-figures-vietnam"
+fig_out_dir.mkdir(exist_ok=True)
+```
+
+```{python}
+# to hold extracted data dictionaries
+# dicts have this form: {"sensor": x, "polarization": x, "r": r, "N": x "p": x}
+pearsonsr = list()
+```
+
+```{python}
+polygons = gpd.read_file(vector_file_path)
+polygons
+```
+
+# Polygon statistics
+
+```{python}
+polygons_m = polygons.to_crs('epsg:32648')  # convert CRS to have unit meter
+polygons["area_ha"] = polygons_m['geometry'].area / 10_000  # 10000m² =  1ha
+```
+
+```{python}
+sns.histplot(data=polygons, x="area_ha", bins=np.arange(-0.5, 10, 0.25),)
+plt.savefig(fig_out_dir / "polygon-size-ha.png")
+```
+
+```{python}
+polygons["area_ha"].quantile([0.85, 0.97])
+```
+
+# Methods
+
+
+## Zonal statistics methods
+
+```{python}
+def compute_zonal_stats_rasterio(raster_path, polygons, raster_transformation_func=None, band_idx=0):
+    with rasterio.open(raster_path) as src:
+        stats_list = compute_zonal_stats_rasterio_opened(polygons=polygons, raster_ds=src, raster_transformation_func=raster_transformation_func, band_idx=band_idx)
+    assert len(stats_list) >= 1, ("Couldn't retrieve statistics!", raster_path, len(polygons))
+    count_before_size_filtering = len(stats_list)
+    stats_list = [s for s in stats_list if s["count"] > 20] # is it??? # everything is at 10m pixel spacing or better, therefore, 0.5ha should be enough
+    assert len(stats_list) >= 1, ("Didn't found big enouhg polygons!", raster_path, len(polygons))
+    count_after_size_filtering = len(stats_list)
+    print(f"Filtered {count_before_size_filtering - count_after_size_filtering} polygons.")
+    return stats_list
+```
+
+## S2 NDVI creation methods
+
+
+### mNDWI and other VIs tifs
+
+```{python}
+def open_s2_zip_all_resolutions(s2_zip_path, 
+                                bands, 
+                                band_resolutions, 
+                                cloud_mask_threshold: int = 60):
+    band_arrays = list()
+    profile = None
+
+    assert all([b in {"10m", "20m"} for b in band_resolutions]), ("Only 10m and 20m bands supported so far", band_resolutions)
+    highest_resolution = min(int(b[:2]) for b in band_resolutions)
+    highest_resolution = f"{highest_resolution}m"
+
+    with zipfile.ZipFile(s2_zip_path, 'r') as z:
+        # extract raster band names
+        band_paths = list()
+        for band, band_resolution in zip(bands, band_resolutions):
+            _band_paths = list(filter(lambda f: f'{band}_{band_resolution}.jp2' in f, z.namelist()))
+            assert len(_band_paths) == 1, (f'{band}_{band_resolution}.jp2 not found in zip')
+            band_paths.append((_band_paths[0], band_resolution))
+
+        # Read the raster bands
+        for band_path, band_resolution in band_paths:
+            with z.open(band_path) as f:
+                with MemoryFile(f.read()) as memfile:
+                    with memfile.open() as src:
+                        band_data = src.read(1)
+                        #print(f"{band_path=}  {band_resolution=}  {highest_resolution=}")
+                        if band_resolution == "20m" and highest_resolution == "10m":
+                            band_data = resample_20m_to_10m(band_data, spline_order=1)  # linear interploation?
+                        band_arrays.append(band_data)
+                        
+                        # Copy the profile for the first band and modify it for multi-band
+                        if profile is None and band_resolution == highest_resolution:
+                            profile = src.profile
+    # modify the profile for multi-band
+    profile.update(count=len(band_arrays), nodata=np.nan)
+    
+    # Create an in-memory multi-band raster dataset
+    multi_band_array = np.stack(band_arrays)
+    memfile = MemoryFile()
+    with memfile.open(**profile) as dataset:
+        dataset.write(multi_band_array)
+    
+    return memfile
+```
+
+```{python}
+def open_s2_and_save_normalized_difference_img(s2_zip_path, out_path, bands, band_resolutions):
+    if out_path.is_file():
+        print("Skipping existing tif.", out_path)
+        return
+
+    cloud_mask_threshold = 40
+    scl_mask_values = [0, 1, 2, 3, 6, 7, 8, 9, 10, 11]
+    # No Data, Saturated or defective pixel, Topographic casted shadows, Cloud shadows, Cloud medium|high probability, cirrus, ice/snow
+    s2_memfile = open_s2_zip_all_resolutions(s2_zip_path=s2_zip_path, bands=bands, band_resolutions=band_resolutions)
+    with s2_memfile.open() as s2_zip:
+        s2_raster = s2_zip.read().astype(np.float32)
+        s2_raster_profile = s2_zip.profile
+    assert s2_raster.shape[0] == len(bands)
+
+    ### NDVI calculation
+    s2_raster = np.clip(s2_raster, 1_000, 11_000) - 1000 # to have reflectance from 0-10k, clipping to avoid integer underflow
+    ndvi_raster = (s2_raster[0] - s2_raster[1])/(s2_raster[0] + s2_raster[1] + 1e-9)
+    ndvi_raster = np.clip(ndvi_raster, -1, 1)  # this should already be bound to this, but is not, so do it manually
+
+    scl_raster = read_s2_zip_scl(s2_zip_path)
+    if ndvi_raster.shape == (10980, 10980):  # 10m bands included
+        scl_raster = resample_20m_to_10m(scl_raster)
+    mask = (scl_raster == scl_mask_values[0])
+    for scl_mask_value in scl_mask_values:
+        mask |= (scl_raster == scl_mask_value)
+    
+    ndvi_masked = np.where(mask, np.nan, ndvi_raster)
+    ndvi_masked = ndvi_masked.astype(np.float32)
+
+    with rasterio.open(out_path, "w", driver='GTiff', 
+                       height=s2_raster_profile["height"], 
+                       width=s2_raster_profile["width"], 
+                       dtype=ndvi_masked.dtype, 
+                       crs=s2_raster_profile["crs"], 
+                       transform=s2_raster_profile["transform"], 
+                       count=1,
+                       compress="PACKBITS",
+                      ) as ndvi_ds:
+        ndvi_ds.write(ndvi_masked, 1)
+```
+
+```{python}
+def open_s2_and_save_mndwi_img(s2_zip_path, ndvi_tif_dir):
+    """Calculate MNDWI for S2 images: MNDWI = (B3 − B11)(B3 + B11)."""
+    mndwi_tif_path = s2_zip_path.parent / (s2_zip_path.stem + "_mNDWI" + ".tif")
+    bands = ['B03', 'B11']
+    band_resolutions = ["10m", "20m"]
+    open_s2_and_save_normalized_difference_img(s2_zip_path=s2_zip_path, 
+                                               out_path=mndwi_tif_path, 
+                                               bands=bands, band_resolutions=band_resolutions)
+```
+
+### Get zip paths and convert files
+
+```{python}
+s2_zip_files = [
+    s2_img_dir / "S2A_MSIL2A_20230808T031541_N0509_R118_T48PWS_20230808T073452.SAFE.zip",
+    s2_img_dir / "S2B_MSIL2A_20230306T031619_N0509_R118_T48PWS_20230306T070117.SAFE.zip",
+]
+```
+
+```{python}
+for s2_zip in tqdm(s2_zip_files):
+    open_s2_and_save_ndvi_img(s2_zip_path=s2_zip, ndvi_tif_dir=s2_img_dir)
+    open_s2_and_save_mndwi_img(s2_zip, ndvi_tif_dir=s2_img_dir)
+```
+
+## Geocode NovaSAR files
+
+```{python}
+def geocode_novasar_raster(novasar_raster, out_crs="EPSG:4326"):
+    geocode_cmd_template = "gdalwarp -tps -r bilinear -srcnodata 0 -dstnodata 0 -t_srs {crs} '{src}' '{dst}'"
+    geocoded_outpath = novasar_raster.parent / (novasar_raster.stem + "_wgs84.tif")#"_utm.tif")
+    
+    if geocoded_outpath.is_file():
+        pass
+        print(f"{Path(geocoded_outpath).parent} already geocoded. Skipping")
+    else:
+        geocode_cmd = geocode_cmd_template.format(crs=out_crs, src=str(novasar_raster), dst=str(geocoded_outpath))
+        #print(f"Running '{geocode_cmd}'")
+        #os.system(geocode_cmd)
+        print(geocode_cmd)
+    return geocoded_outpath
+```
+
+```{python}
+#novasar_raster_dirs = novasar_img_dir.glob("NovaSAR_01_*HH_HV")
+#for novasar_raster_dir in novasar_raster_dirs:
+#    novasar_raster_files = novasar_raster_dir.glob("image_??.tif")
+#    for novasar_raster_file in novasar_raster_files:
+#        geocode_novasar_raster(novasar_raster_file)
+```
+
+# Get raster file paths
+
+
+### NovaSAR
+
+```{python}
+novasar_raster_files = [
+    novasar_img_dir / "NovaSAR_01_42627_scd_32_230305_030519_HH_HV_TC2-linear.tif",
+    novasar_img_dir / "NovaSAR_01_46818_scd_32_230806_152509_HH_HV_TC2_modified-linear.tif"
+]
+novasar_rvi_files = [
+    novasar_img_dir / "NovaSAR_01_42627_scd_32_230305_030519_HH_HV_TC2-linear-RVI.tif",
+    novasar_img_dir / "NovaSAR_01_46818_scd_32_230806_152509_HH_HV_TC2_modified-linear-RVI.tif"
+]
+assert all([d.is_file() for d in (novasar_raster_files + novasar_rvi_files)])
+```
+
+### S-2 tifs
+
+```{python}
+ndvi_files = list(s2_img_dir.glob("*_NDVI.tif"))
+mndwi_files = list(s2_img_dir.glob("*_mNDWI.tif"))
+len(set(ndvi_files)), len(set(mndwi_files))
+```
+
+### Sentinel-1
+
+```{python}
+def get_s1_snap_and_rvi_processed_files(s1_dir):
+    # Subset_S1A_IW_GRDH_1SDV_20230305T224558_20230305T224623_047515_05B494_D765_Orb_NR_Cal_TC_dB
+    db_rasters = list(s1_img_dir.glob("Subset_S1?_IW_GRDH_*_Orb_NR_Cal_TC_dB.tif"))
+    rvi_rasters = list(s1_img_dir.glob("Subset_S1?_IW_GRDH_*_Orb_NR_Cal_TC_dB_RVI.tif"))
+    return db_rasters, rvi_rasters
+
+s1_raster_files, s1_rvi_files = get_s1_snap_and_rvi_processed_files(s1_dir=s1_img_dir)
+s1_raster_files, s1_rvi_files
+```
+
+### SAOCOM
+
+```{python}
+# Subset_S1A_OPER_SAR_EOSSP__CORE_L1A_OLF_20230309T204419_Cal_ML_SRGR_TC_dB
+saocom_raster_files = list(saocom_dir.glob("Subset_S1*_Cal_ML_SRGR_TC_dB*_modified.tif"))
+saocom_rvi_files = list(saocom_dir.glob("Subset_S1*_Cal_ML_SRGR_TC_dB*_modified_RVI.tif"))
+saocom_raster_files, saocom_rvi_files
+```
+
+### CSG
+
+```{python}
+csg_raster_files = [csg_csk_dir / "Subset_CSG_SSAR2_DGM_B_0101_STR_014_HH-HV-LIA_RA_R_20230806225718_20230806225725_1_F_11N_Z48_N00.h5_ML_TC_dB.tif"]
+csg_rvi_raster_files = [csg_csk_dir / "Subset_CSG_SSAR2_DGM_B_0101_STR_014_HH-HV-LIA_RA_R_20230806225718_20230806225725_1_F_11N_Z48_N00.h5_ML_TC_dB_RVI.tif"]
+```
+
+# Get statistiscs
+
+
+### Sentinel-2
+
+```{python}
+novasar_s2_date_mapping = {
+    # novasar_date: s2_date
+    '20230305': "20230306",
+    "20230806": "20230808", 
+}
+```
+
+```{python}
+s2_vi_filter_func = lambda p: any((date in p.stem) for date in novasar_s2_date_mapping.values())
+ndvi_files = list(filter(s2_vi_filter_func, ndvi_files))
+mndwi_files = list(filter(s2_vi_filter_func, mndwi_files))
+```
+
+```{python}
+def get_s2_statistics(s2_ndvi_files, s2_mndwi_files, polygons):
+    stats = list()
+    
+    for ndvi_file, mndwi_file in tqdm(zip(s2_ndvi_files, s2_mndwi_files)):
+        stats_ndvi = compute_zonal_stats_rasterio(polygons=polygons, raster_path=ndvi_file)
+        stats_mndwi = compute_zonal_stats_rasterio(polygons=polygons, raster_path=mndwi_file)
+            
+        for d_ndvi, d_mndwi in zip(stats_ndvi, stats_mndwi):
+            assert d_ndvi["polygon_id"] == d_mndwi["polygon_id"]
+            d_ndvi["filename"] = ndvi_file.stem
+            d_ndvi["mndwi_mean"] = d_mndwi["mean"]
+            stats.append(d_ndvi)   
+    stats_df = pd.DataFrame(stats)
+    return stats_df
+```
+
+```{python}
+stats_s2_df = get_s2_statistics(s2_ndvi_files=ndvi_files, s2_mndwi_files=mndwi_files, polygons=polygons)
+_s2_dates = stats_s2_df.loc[:, "filename"].map(lambda f: f.split("_")[2].split("T")[0]).copy()
+stats_s2_df.loc[:, "date"] = _s2_dates
+stats_s2_df = stats_s2_df.merge(polygons, on="polygon_id")
+stats_s2_df = stats_s2_df[stats_s2_df.mndwi_mean <= 0.2]
+len(stats_s2_df)
+```
+
+```{python}
+stats_s2_df
+```
+
+### NovaSAR
+
+```{python}
+def read_inc_angle(metadata_filepath):
+    # <IncAngleCoeffs>27.075 0.00085775 -5.5288E-09 -2.2216E-14 -7.7528E-18 2.6808E-21 </IncAngleCoeffs>
+    with open(metadata_filepath, "r") as fd:
+        lines = fd.readlines()
+        angle_line = list(filter(lambda l: "IncAngleCoeffs" in l, lines))
+        assert len(angle_line) == 1
+        angle_line = angle_line[0].strip()  # remove whitespace
+        inc_angle = angle_line.split(">")[1].split(" ")[0]
+    inc_angle = float(inc_angle)
+    return inc_angle
+```
+
+```{python}
+def novasar_raster_to_logscale(calibrated: np.ma.masked_array):
+    assert type(calibrated) == np.ma.core.MaskedArray, ("Type error.", type(calibrated))
+    
+    db_data = np.ones_like(calibrated)
+    valid_mask = (calibrated > 0)                # negative values/zero are invalid for log10
+    db_data[valid_mask] = calibrated[valid_mask] # copy usable values
+    assert np.all(db_data.data > 0)
+    
+    db_data = 10 * np.log10(db_data)
+    db_data = np.ma.masked_equal(db_data, 0)
+    db_data.mask |= (calibrated == 0)
+    assert type(db_data) == np.ma.core.MaskedArray, ("Type error.", type(db_data))
+
+    return db_data
+```
+
+```{python}
+def get_poylgon_stats_novasar(novasar_raster_files, polygons, raster_transformation_func=None):
+    stats_novasar = list()
+    for novasar_raster_file, rvi_file in tqdm(zip(novasar_raster_files, novasar_rvi_files)):
+        
+        stats_hh = compute_zonal_stats_rasterio(raster_path=novasar_raster_file, polygons=polygons, raster_transformation_func=raster_transformation_func, band_idx=0)
+        stats_hv = compute_zonal_stats_rasterio(raster_path=novasar_raster_file, polygons=polygons, raster_transformation_func=raster_transformation_func, band_idx=1)
+        stats_lia = compute_zonal_stats_rasterio(raster_path=novasar_raster_file, polygons=polygons, band_idx=2)
+
+        stats_rvi = compute_zonal_stats_rasterio(raster_path=novasar_raster_file, polygons=polygons, band_idx=1)
+
+        for stats_pol, pol in [(stats_hh, "HH"), (stats_hv, "HV"), (stats_rvi, "RVI")]:
+            for d, lia in zip(stats_pol, stats_lia):
+                d["filename"] = novasar_raster_file.stem
+                d["polarization"] = pol
+                d["incidence_angle"] = lia["mean"]
+            stats_novasar.extend(stats_pol)
+    stats_novasar = pd.DataFrame(stats_novasar)
+    return stats_novasar
+```
+
+```{python}
+stats_novasar_df = get_poylgon_stats_novasar(novasar_raster_files=novasar_raster_files, 
+                                             polygons=polygons, 
+                                             raster_transformation_func=novasar_raster_to_logscale)
+```
+
+```{python}
+filename_date_mapping = {
+    "NovaSAR_01_42627_scd_32_230305_030519_HH_HV_TC2-linear": "20230305",
+    "NovaSAR_01_46818_scd_32_230806_152509_HH_HV_TC2_modified-linear": "20230806",
+}
+```
+
+```{python}
+stats_novasar_df.loc[:, "date"] = stats_novasar_df.loc[:, "filename"].map(lambda f: filename_date_mapping[f]).copy()
+```
+
+```{python}
+stats_novasar_df =  add_cr(data=stats_novasar_df, x="median", cross_pol="HV", co_pol="HH", date_col="date", cr_col="CR")
+```
+
+```{python}
+_s2_date_of_novasar_img = stats_novasar_df.loc[:, "date"].map(lambda d: novasar_s2_date_mapping[d]).copy()
+stats_novasar_df.loc[:, "s2_date"] = _s2_date_of_novasar_img
+stats_novasar_df = stats_novasar_df[stats_novasar_df.loc[:, "s2_date"] != ""]
+stats_novasar_df
+```
+
+```{python}
+sns.histplot(data=stats_novasar_df, x="incidence_angle", hue="date")
+plt.savefig(fig_out_dir / "novasar-incidence_angle.png")
+```
+
+#### Data distribution plots
+
+```{python}
+g = sns.FacetGrid(data=stats_novasar_df, col="polarization", sharex=False)
+g.map_dataframe(sns.histplot, x="median")
+plt.savefig(fig_out_dir / f"novasar-distribution-alldatatypes.png")
+```
+
+### S1 statistics
+
+```{python}
+s1_s2_date_mapping = {
+    # s1_date : s2_date
+    "20230305": "20230306", 
+    "20230306": "20230306",
+    "20230808": "20230808",
+    "20230809": "20230808",
+}
+s1_orbit_mapping = {
+    # s1 date : orbit
+    "20230305": "DESCENDING", 
+    "20230306": "ASCENDING",
+    "20230808": "DESCENDING",
+    "20230809": "ASCENDING",
+    "20230621": "???",
+    "20230116": "???",
+
+}
+```
+
+```{python}
+def get_s1_statistcs_dataframe(s1_rasters, s1_rvi_rasters, polygons):
+    stats = list()
+    for s1_raster, s1_rvi_raster in zip(s1_rasters, s1_rvi_rasters):
+        _stats_vh = compute_zonal_stats_rasterio(raster_path=s1_raster, polygons=polygons, band_idx=0)
+        _stats_vv = compute_zonal_stats_rasterio(raster_path=s1_raster, polygons=polygons, band_idx=1)
+        _stats_lia = compute_zonal_stats_rasterio(raster_path=s1_raster, polygons=polygons, band_idx=3)
+        _stats_rvi = compute_zonal_stats_rasterio(raster_path=s1_rvi_raster, polygons=polygons, band_idx=0)
+        
+        for _stats, pol in zip([_stats_vv, _stats_vh, _stats_rvi], ["VV", "VH", "RVI"]):
+            for d, lia in zip(_stats, _stats_lia):
+                d["filename"] = s1_raster.stem
+                d["polarization"] = pol
+                d["local_incidence_angle"] = lia["mean"]
+            stats.extend(_stats)
+
+    stats = pd.DataFrame(stats)
+    return stats
+
+def s1_add_date_using_filename(s1_df):
+    # Subset_S1A_IW_GRDH_1SDV_20210806T194104_20210806T194129_039113_049D9A_1D7A_Orb_NR_Cal_TC_VH.tif
+    date_func = lambda f: f.split("_")[5].split("T")[0]
+    s1_dates = s1_df.loc[:, "filename"].map(date_func).copy()
+    s1_df.loc[:, "date"] = s1_dates
+    return s1_df
+```
+
+```{python}
+s1_filter_func = lambda p: any((date in p.stem) for date in s1_s2_date_mapping.keys())
+s1_raster_files = list(filter(s1_filter_func, s1_raster_files))
+```
+
+```{python}
+stats_s1 = get_s1_statistcs_dataframe(s1_rasters=s1_raster_files, s1_rvi_rasters=s1_rvi_files, polygons=polygons)
+stats_s1 = s1_add_date_using_filename(stats_s1)
+stats_s1 =  add_cr(data=stats_s1, x="median", cross_pol="VH", co_pol="VV", date_col="date", cr_col="CR")
+```
+
+#### Data distribution plotsm
+
+```{python}
+sns.histplot(data=stats_s1, x="local_incidence_angle", hue="date")
+plt.savefig(fig_out_dir / "s1-incidence_angle.png")
+```
+
+```{python}
+g = sns.FacetGrid(data=stats_s1, col="polarization", sharex=False)
+g.map_dataframe(sns.histplot, x="median")
+plt.savefig(fig_out_dir / f"s1-distribution-alldatatypes.png")
+```
+
+### SAOCOM
+
+```{python}
+def get_saocom_statistcs_dataframe(saocom_rasters, saocom_rvi_rasters, polygons):
+    stats = list()
+    for sao_raster, sao_rvi in tqdm(zip(saocom_rasters, saocom_rvi_rasters)):
+        # TODO check if the band_idx - polarization mapping is correct
+        _stats_hh = compute_zonal_stats_rasterio(raster_path=sao_raster, polygons=polygons, band_idx=0)
+        _stats_hv = compute_zonal_stats_rasterio(raster_path=sao_raster, polygons=polygons, band_idx=1)
+        _stats_lia = compute_zonal_stats_rasterio(raster_path=sao_raster, polygons=polygons, band_idx=2)
+        _stats_rvi = compute_zonal_stats_rasterio(raster_path=sao_rvi, polygons=polygons, band_idx=0)
+
+        for _stats, pol in zip([_stats_hh, _stats_hv, _stats_rvi], ["HH", "HV", "RVI"]):
+            for d, lia in zip(_stats, _stats_lia):
+                d["filename"] = sao_raster.stem
+                d["polarization"] = pol
+                d["local_incidence_angle"] = lia["mean"]
+            stats.extend(_stats)
+    
+    stats = pd.DataFrame(stats)
+    return stats
+
+stats_saocom = get_saocom_statistcs_dataframe(saocom_rasters=saocom_raster_files, saocom_rvi_rasters=saocom_rvi_files, polygons=polygons)
+```
+
+```{python}
+# for SAOCOM, the filename contains only the processing date (?), not the acquision date.
+# the acquisition date is only in the metadata, visible in SNAP
+# therefore, we have to add this mapping manually
+saocom_filepath_date_mapping = {
+    "Subset_S1B_OPER_SAR_EOSSP__CORE_L1A_OLF_20230305T114407_Cal_ML_SRGR_TC_dB": "20230303", 
+    "Subset_S1A_OPER_SAR_EOSSP__CORE_L1A_OLF_20230309T204419_Cal_ML_SRGR_TC_dB": "20230306", 
+    "Subset_S1B_OPER_SAR_EOSSP__CORE_L1A_OLF_20230807T041747_Cal_ML_SRGR_TC_dB": "20230805", 
+    "Subset_S1B_OPER_SAR_EOSSP__CORE_L1A_OLF_20230807T041747_Cal_ML_SRGR_TC_dB_modified": "20230805",
+    "Subset_S1A_OPER_SAR_EOSSP__CORE_L1A_OLF_20230309T204419_Cal_ML_SRGR_TC_dB_modified": "20230306",
+    "Subset_S1B_OPER_SAR_EOSSP__CORE_L1A_OLF_20230305T114407_Cal_ML_SRGR_TC_dB_modified": "20230303",    
+}
+```
+
+```{python}
+stats_saocom["date"] = stats_saocom.filename.map(lambda f: saocom_filepath_date_mapping[f]).copy()
+```
+
+```{python}
+sns.histplot(data=stats_saocom, x="median", hue="polarization", element="step")
+```
+
+```{python}
+stats_saocom = add_cr(data=stats_saocom, x="median", cross_pol="HV", co_pol="HH", date_col="date", cr_col="CR")
+stats_saocom["local_incidence_angle"] = 10**(stats_saocom["local_incidence_angle"]/10)  # because of wrong processing, this is in dB and needs to be converted back
+```
+
+#### Data distributions plots
+
+```{python}
+sns.histplot(data=stats_saocom, x="local_incidence_angle", hue="date", element="step")
+plt.savefig(fig_out_dir / "saocom-incidence_angle.png")
+```
+
+```{python}
+g = sns.FacetGrid(data=stats_saocom, col="polarization", sharex=False)
+g.map_dataframe(sns.histplot, x="median")
+plt.savefig(fig_out_dir / f"saocom-distribution-alldatatypes.png")
+```
+
+### CSG 
+
+```{python}
+def get_csg_statistcs_dataframe(csg_rasters, csg_rvi_rasters, polygons):
+    stats = list()
+    for csg_raster, csg_rvi_raster in tqdm(zip(csg_rasters, csg_rvi_rasters), 
+                                           total=len(csg_rasters)):
+        
+        _stats_hh = compute_zonal_stats_rasterio(raster_path=csg_raster, polygons=polygons, band_idx=0)
+        _stats_hv = compute_zonal_stats_rasterio(raster_path=csg_raster, polygons=polygons, band_idx=1)
+        _stats_lia = compute_zonal_stats_rasterio(raster_path=csg_raster, polygons=polygons, band_idx=2)
+        _stats_rvi = compute_zonal_stats_rasterio(raster_path=csg_rvi_raster, polygons=polygons, band_idx=0)
+        pol_stats = {"HH": _stats_hh, "HV": _stats_hv, "RVI": _stats_rvi}
+        for pol, _stats in pol_stats.items():
+            for d, lia in zip(_stats, _stats_lia):
+                d["filename"] = csg_raster.stem
+                d["polarization"] = pol
+                d["local_incidence_angle"] = lia["mean"]
+            stats.extend(_stats)
+
+    stats = pd.DataFrame(stats)
+    return stats
+
+def add_csg_date_using_filename(df):
+    # Subset_CSG_SSAR2_DGM_B_0101_STR_014_HH-HV-LIA_RA_R_20230806225718_20230806225725_1_F_11N_Z48_N00.h5_ML_TC_dB.tif.vrt
+    date_func = lambda f: f.split("_")[9][:8]
+    dates = df.loc[:, "filename"].map(date_func).copy()
+    df.loc[:, "date"] = dates
+    return df
+
+stats_csg = get_csg_statistcs_dataframe(csg_rasters=csg_raster_files, csg_rvi_rasters=csg_rvi_raster_files, polygons=polygons)
+stats_csg
+```
+
+```{python}
+csg_filename_date_mapping = {
+    "Subset_CSG_SSAR2_DGM_B_0101_STR_014_HH-HV-LIA_RA_R_20230806225718_20230806225725_1_F_11N_Z48_N00.h5_ML_TC_dB": "20230806",
+}
+stats_csg["date"] = stats_csg.filename.map(lambda f: csg_filename_date_mapping[f]).copy()
+```
+
+```{python}
+stats_csg = add_cr(data=stats_csg, x="median", cross_pol="HV", co_pol="HH", date_col="date", cr_col="CR")
+stats_csg["local_incidence_angle"] = 10**(stats_csg["local_incidence_angle"]/10)  # because of wrong processing, this is in dB and needs to be converted back
+```
+
+#### data distribution pltos
+
+```{python}
+sns.histplot(data=stats_csg, x="median", hue="polarization")
+```
+
+```{python}
+sns.histplot(data=stats_csg, x="local_incidence_angle")
+plt.savefig(fig_out_dir / "csg-incidence_angle.png")
+```
+
+```{python}
+g = sns.FacetGrid(data=stats_csg, col="polarization", sharex=False)
+g.map_dataframe(sns.histplot, x="median")
+plt.savefig(fig_out_dir / f"csg-distribution-alldatatypes.png")
+```
+
+# Filter and combine stats
+
+
+# Visualisierung
+
+```{python}
+sns.set_theme(style="whitegrid")
+ylim = (-0.1, 1)
+```
+
+## NovaSAR
+
+```{python}
+print("sar:", list(sorted(stats_novasar_df.date.unique().tolist())))
+print(" s2:", list(sorted(stats_s2_df.date.unique())))
+```
+
+```{python}
+sensor = "NovaSAR"
+```
+
+```{python}
+joined_novasar = stats_novasar_df.merge(right=stats_s2_df,  
+                                how="outer",
+                                left_on=('polygon_id', 's2_date'), 
+                                right_on=('polygon_id', "date"), 
+                                suffixes=('_novasar', '_s2'))
+joined_novasar = joined_novasar[~pd.isnull(joined_novasar.s2_date)]
+joined_novasar = joined_novasar[~pd.isnull(joined_novasar.median_s2)]
+joined_novasar
+```
+
+```{python}
+joined_novasar.to_csv(fig_out_dir / "novasar-s2-statistics.csv")
+```
+
+```{python}
+list(sorted(joined_novasar.date_novasar.unique())), list(sorted(joined_novasar.polarization.unique()))
+```
+
+```{python}
+_joined = joined_novasar.copy()
+datanames = ["HV", "HH", "CR", "RVI"]
+xlabels = ["backscatter [dB]", "backscatter [dB]", "cross-ratio [dB]", "RVI"]
+xlims = [(-30, -7), (-20, 7), (3, None), (0, None)]
+```
+
+```{python}
+for dataname, xlabel, xlim in zip(datanames, xlabels, xlims):
+    joined_pol = _joined[_joined.polarization == dataname].copy()
+    scatterplot_nice(x="median_novasar", y="median_s2", data=joined_pol,
+                     hue="incidence_angle",
+                     xlabel=xlabel, ylabel="NDVI", huelabel="local incidence angle",
+                     xlim=xlim,
+                     ylim=ylim,
+                    )
+    plt.savefig(fig_out_dir / f"{sensor}-{dataname.lower()}-ndvi-s2-colorincidence.pdf")
+    plt.show()
+    pearsonsr_pol = get_filtered_pearsons_r(x="median_novasar", y="median_s2", data=joined_pol)
+    pearsonsr.append({"sensor": sensor, "polarization": dataname, "r": pearsonsr_pol["r"], "N": pearsonsr_pol["N"], "p": pearsonsr_pol["p"]})
+```
+
+```{python}
+_joined = joined_novasar.copy()
+ndvi_threshold = 0.25
+```
+
+```{python}
+for dataname, xlabel, xlim in zip(datanames, xlabels, xlims):
+    joined_pol = _joined[_joined.polarization == dataname].copy()
+    joined_pol = joined_pol[joined_pol.median_s2 < ndvi_threshold]
+
+    dataname += f" NDVI<{ndvi_threshold}"
+    pearsonsr_pol = get_filtered_pearsons_r(x="median_novasar", y="median_s2", data=joined_pol)
+    pearsonsr.append({"sensor": sensor, "polarization": dataname, "r": pearsonsr_pol["r"], "N": pearsonsr_pol["N"], "p": pearsonsr_pol["p"]})
+```
+
+```{python}
+for dataname, xlabel, xlim in zip(datanames, xlabels, xlims):
+    joined_pol = _joined[_joined.polarization == dataname].copy()
+    joined_pol = joined_pol[joined_pol.median_s2 > ndvi_threshold]
+
+    dataname += f" NDVI>{ndvi_threshold}"
+    pearsonsr_pol = get_filtered_pearsons_r(x="median_novasar", y="median_s2", data=joined_pol)
+    pearsonsr.append({"sensor": sensor, "polarization": dataname, "r": pearsonsr_pol["r"], "N": pearsonsr_pol["N"], "p": pearsonsr_pol["p"]})
+```
+
+```{python}
+for dataname, xlabel, xlim in zip(datanames, xlabels, xlims):
+    joined_pol = _joined[_joined.polarization == dataname].copy()
+    scatterplot_nice(x="median_novasar", y="median_s2", data=joined_pol, 
+                     hue="date_s2", style="date_s2", 
+                     xlabel=xlabel, ylabel="NDVI", huelabel="date",
+                     xlim=xlim,
+                     ylim=ylim,
+                    )
+    plt.savefig(fig_out_dir / f"{sensor}-{dataname.lower()}-ndvi-s2-colordate.pdf")
+    plt.show()
+```
+
+## Sentinel-1
+
+```{python}
+sensor = "S1"
+```
+
+```{python}
+print("S1:", list(sorted(stats_s1.date.unique())))
+print("S2:", list(sorted(stats_s2_df.date.unique())))
+```
+
+```{python}
+_s2_date_of_s1_img = stats_s1.loc[:, "date"].map(lambda d: s1_s2_date_mapping[d]).copy()
+stats_s1.loc[:, "s2_date"] = _s2_date_of_s1_img
+```
+
+```{python}
+joined_s1 = stats_s1.merge(right=stats_s2_df,  
+                                how="outer",
+                                left_on=('polygon_id', 's2_date'), 
+                                right_on=('polygon_id', "date"), 
+                                suffixes=('_s1', '_s2'))
+joined_s1 = joined_s1[~pd.isnull(joined_s1.date_s2)]
+joined_s1 = joined_s1[~pd.isnull(joined_s1.count_s1)]
+joined_s1
+```
+
+```{python}
+joined_s1["s2_date_iso"] = joined_s1.s2_date.map(lambda s: s[:4]+"-"+s[4:6]+"-"+s[6:])
+```
+
+```{python}
+joined_s1.to_csv(fig_out_dir / "sentinel1-s2-statistics.csv")
+```
+
+```{python}
+_joined = joined_s1.copy()
+
+datanames = ["VV", "VH", "CR", "RVI"]
+xlabels = ["backscatter [dB]", "backscatter [dB]", "cross-ratio [dB]", "RVI"]
+xlims = [(-20, -2), (-30, -10), None, (0, None)]
+```
+
+```{python}
+for dataname, xlabel, xlim in zip(datanames, xlabels, xlims):
+    joined_pol = _joined[_joined.polarization == dataname].copy()
+    joined_pol = joined_pol.rename(columns={"s2_date_iso": "date", "local_incidence_angle": "local incidence angle"})
+    scatterplot_nice(x="median_s1", y="median_s2", hue="local incidence angle", 
+                     data=joined_pol,
+                     xlabel=xlabel, ylabel="NDVI", huelabel=None,
+                     xlim=xlim,
+                     ylim=ylim,
+                    )
+    plt.savefig(fig_out_dir / f"{sensor}-{dataname.lower()}-ndvi-s2-colorincidence.pdf")
+    plt.show()
+    pearsonsr_pol = get_filtered_pearsons_r(x="median_s1", y="median_s2", data=joined_pol)
+    pearsonsr.append({"sensor": sensor, "polarization": dataname, "r": pearsonsr_pol["r"], "N": pearsonsr_pol["N"], "p": pearsonsr_pol["p"]})
+```
+
+```{python}
+for dataname, xlabel, xlim in zip(datanames, xlabels, xlims):
+    joined_pol = _joined[_joined.polarization == dataname].copy()
+    joined_pol = joined_pol.rename(columns={"s2_date_iso": "date", "local_incidence_angle": "local incidence angle"})
+    scatterplot_nice(x="median_s1", y="median_s2", hue="date", 
+                     data=joined_pol,
+                     xlabel=xlabel, ylabel="NDVI", huelabel=None,
+                     xlim=xlim,
+                     ylim=ylim,
+                     )
+    plt.savefig(fig_out_dir / f"{sensor}-{dataname.lower()}-ndvi-s2-colordate.pdf")
+    plt.show()
+```
+
+```{python}
+pol = "VH"
+data_pol = _joined[_joined.polarization == pol]
+sns.relplot(data=data_pol, x="median_s1", y="median_s2", col="s2_date", kind="scatter", col_wrap=4, height=3, facet_kws={"xlim": (-30, -10), "ylim": (0, 1)})
+```
+
+```{python}
+_joined = joined_s1.copy()
+ndvi_threshold = 0.25
+```
+
+```{python}
+for dataname, xlabel, xlim in zip(datanames, xlabels, xlims):
+
+    joined_pol = _joined[_joined.polarization == dataname].copy()
+    joined_pol = joined_pol[joined_pol.median_s2 > ndvi_threshold]
+    joined_pol = joined_pol.rename(columns={"s2_date_iso": "date", "local_incidence_angle": "local incidence angle"})
+    scatterplot_nice(x="median_s1", y="median_s2", hue="date", 
+                     data=joined_pol,
+                     xlabel=xlabel, ylabel="NDVI", huelabel=None,
+                     xlim=xlim,
+                     )
+    plt.show()
+    dataname += f" NDVI>{ndvi_threshold}"
+
+    pearsonsr_pol = get_filtered_pearsons_r(x="median_s1", y="median_s2", data=joined_pol)
+    pearsonsr.append({"sensor": sensor, "polarization": dataname, "r": pearsonsr_pol["r"], "N": pearsonsr_pol["N"], "p": pearsonsr_pol["p"]})
+```
+
+## SAOCOM
+
+```{python}
+sensor = "SAOCOM"
+```
+
+```{python}
+print("SAO:", stats_saocom.date.unique())
+print("S2 :", stats_s2_df.date.unique())
+```
+
+```{python}
+saocom_s2_date_mapping = {
+    # saocom  : s2_date
+    "20230303": "20230306", 
+    "20230306": "20230306",
+    "20230805": "20230808",
+}
+```
+
+```{python}
+_s2_date_of_saocom_img = stats_saocom.loc[:, "date"].map(lambda d: saocom_s2_date_mapping[d]).copy()
+stats_saocom.loc[:, "s2_date"] = _s2_date_of_saocom_img
+```
+
+```{python}
+joined_saocom = stats_saocom.merge(right=stats_s2_df,  
+                                how="outer",
+                                left_on=('polygon_id', 's2_date'), 
+                                right_on=('polygon_id', "date"), 
+                                suffixes=('_saocom', '_s2'))
+joined_saocom = joined_saocom[~pd.isna(joined_saocom.median_s2)]
+joined_saocom = joined_saocom[~pd.isna(joined_saocom.mean_saocom)]
+joined_saocom
+```
+
+```{python}
+joined_saocom.to_csv(fig_out_dir / "saocom-s2-statistics.csv")
+```
+
+```{python}
+_joined = joined_saocom.copy()
+
+datanames = ["HH", "HV", "CR", "RVI"]
+xlabels = ["backscatter [dB]", "backscatter [dB]", "cross-ratio [dB]", "RVI"]
+xlims = [(-22.5, -2.5), (-42, -10.5), None, None]
+```
+
+```{python}
+for dataname, xlabel, xlim in zip(datanames, xlabels, xlims):
+    joined_pol = _joined[_joined.polarization == dataname]
+    scatterplot_nice(x="median_saocom", y="median_s2", hue="local_incidence_angle", 
+                     data=joined_pol,
+                     xlabel=xlabel, ylabel="NDVI", huelabel="local incidence angle",
+                     ylim=ylim,
+                     )
+    plt.savefig(fig_out_dir / f"{sensor.lower()}-{dataname.lower()}-ndvi-s2-colorincidence.pdf")
+    plt.show()
+    pearsonsr_pol = get_filtered_pearsons_r(x="median_saocom", y="median_s2", data=joined_pol)
+    pearsonsr.append({"sensor": sensor, "polarization": dataname, "r": pearsonsr_pol["r"], "N": pearsonsr_pol["N"], "p": pearsonsr_pol["p"]})
+```
+
+## CSG visualization
+
+```{python}
+sensor = "CSG"
+```
+
+```{python}
+print("CSG:", stats_csg.date.unique())
+print("S2 :", stats_s2_df.date.unique())
+```
+
+```{python}
+csg_s2_date_mapping = {
+    # csg_date : s2_date
+    "20230806": "20230808",
+}
+
+_s2_date_of_csg_img = stats_csg.loc[:, "date"].map(lambda d: csg_s2_date_mapping[d]).copy()
+stats_csg.loc[:, "s2_date"] = _s2_date_of_csg_img
+```
+
+```{python}
+joined_csg = stats_csg.merge(right=stats_s2_df,  
+                                how="outer",
+                                left_on=('polygon_id', 's2_date'), 
+                                right_on=('polygon_id', "date"), 
+                                suffixes=('_csg', '_s2'))
+joined_csg = joined_csg[~pd.isnull(joined_csg.count_csg)]
+joined_csg
+```
+
+```{python}
+joined_csg.to_csv(fig_out_dir / "csk-s2-statistics.csv")
+```
+
+```{python}
+_joined = joined_csg.copy()
+
+datanames = ["HH", "HV", "CR", "RVI"]
+xlabels = ["backscatter [dB]", "backscatter [dB]", "cross-ratio [dB]", "RVI"]
+xlims = [(-16, -3), (-22, -12), (2, None), (0.2, None)]
+```
+
+```{python}
+for dataname, xlabel, xlim in zip(datanames, xlabels, xlims):
+    joined_pol = _joined[_joined.polarization == dataname]
+    scatterplot_nice(x="median_csg", y="median_s2", hue=None,
+                     data=joined_pol,
+                     xlabel=xlabel, ylabel="NDVI", huelabel=None,
+                     ylim=ylim, xlim=xlim,
+                    )
+    plt.savefig(fig_out_dir / f"{sensor.lower()}-{dataname.lower()}-ndvi-s2.pdf")
+    plt.show()
+    pearsonsr_pol = get_filtered_pearsons_r(x="median_csg", y="median_s2", data=joined_pol)
+    pearsonsr.append({"sensor": sensor, "polarization": dataname, "r": pearsonsr_pol["r"], "N": pearsonsr_pol["N"], "p": pearsonsr_pol["p"]})
+```
+
+```{python}
+for dataname, xlabel, xlim in zip(datanames, xlabels, xlims):
+    joined_pol = _joined[_joined.polarization == dataname]
+    joined_pol = joined_pol.rename(columns={"s2_date_iso": "date", "local_incidence_angle": "local incidence angle"})
+
+    scatterplot_nice(x="median_csg", y="median_s2", hue="local incidence angle", 
+                     data=joined_pol,
+                     xlabel=xlabel, ylabel="NDVI", huelabel=None,
+                     xlim=xlim,
+                     ylim=ylim,
+                     )
+    plt.savefig(fig_out_dir / f"{sensor.lower()}-{dataname.lower()}-ndvi-s2-colorincidence.pdf")
+    plt.show()
+```
+
+# Pearson's r Tabelle
+
+```{python}
+pearsonsr_df = pd.DataFrame(pearsonsr)
+print(pearsonsr_df[["sensor", "polarization", "N","r", "p"]].to_markdown())
+print(pearsonsr_df[["sensor", "polarization", "N","r", "p"]].style.format({"r": '{:.2f}', "p": "{:.3f}"},).to_latex(hrules=True))
+```
