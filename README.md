@@ -1,18 +1,15 @@
 # Material for the relationship analysis between SAR backscatter and NDVI values
 This material belongs to an paper under review analysing the relationship between SAR backscatter and NDVI values.
 
-
-* [ ] add description of data processing
-
 ## Field outlines
 
 These field outlines were manually labeled using Sentinel-1 and -2 time series, augmented by Google Satellite imagery.
 
-| File                                                 | Description                                                     |
-| ---------------------------------------------------- | --------------------------------------------------------------- |
-| `fields-outlines-bell-ville-argentina.geojson`       | Field outlines for the study area around Bell Ville, Argentina  |
-| `fields-outlines-boort-australia.geojson`            | Field outlines for the study area around Boort, Australia       |
-| `fields-outlines-mekong-river-delta-vietnam.geojson` | Field outlines for the study in the Mekong River delta, Vietnam |
+| File                                                 | Field outlines of study area   |
+| ---------------------------------------------------- | -------------------------------|
+| `fields-outlines-bell-ville-argentina.geojson`       | around Bell Ville, Argentina   |
+| `fields-outlines-boort-australia.geojson`            | area around Boort, Australia   |
+| `fields-outlines-mekong-river-delta-vietnam.geojson` | in Mekong River delta, Vietnam |
 
 ## Extracted data/values
 For each study area a csv file with the extracted data is uploaded in the folder `extracted-values`.
