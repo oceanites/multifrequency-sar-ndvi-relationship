@@ -1,5 +1,8 @@
 # Material for the relationship analysis between SAR backscatter and NDVI values
-This material belongs to an paper under review analysing the relationship between SAR backscatter and NDVI values.
+This material belongs to the paper *"Comparing the relationship between NDVI and SAR backscatter across different frequency bands in agricultural areas"*, in which the relationship between SAR backscatter and NDVI values is analysed.
+The paper is published in [Remote Sensing of Environment](https://www.sciencedirect.com/science/article/pii/S0034425725000161) (DOI: [10.1016/j.rse.2025.114612](https://doi.org/10.1016/j.rse.2025.114612)).
+
+The material is additionally archived at the [Open Data Hub of the University of the Bundeswehr Munich](https://open-data.unibw.de/dataset.xhtml?persistentId=doi:10.60776/4WIAJ0) (DOI: [10.60776/4WIAJ0](https://doi.org/10.60776/4WIAJ0)).
 
 ## Field outlines
 
@@ -42,3 +45,24 @@ Processing of the SAR data is done mostly using SNAP, for which the processing g
 | `2024-07-25-saocom-ml-tc.xml`            | SAOCOM processing                                                                                                                                                            |
 | `multifreq-2024-06-24-csg-ml3-tc.xml`    | CSK processing                                                                                                                                                               |
 | `beam-dimap-to-tif.xml`                  | Convert BEAM DIMAP files to tifs. Processing in SNAP is way faster, when the output is written as a beam dimap file. Converting this to a tif image is then still very fast. |
+
+# Citation
+
+To cite the paper this text can be used:
+> Roßberg T, Schmitt M (2025). “Comparing the relationship between NDVI and SAR backscatter across different frequency bands in agricultural areas”. Remote Sensing of Environment 319, Art. No. 114612
+
+or the following bibtex/biblatex snippet:
+
+```bibtex
+@article{Rossberg2025,
+ author = {Thomas Roßberg and Michael Schmitt},
+ title = {Comparing the relationship between {NDVI} and {SAR} backscatter across different frequency bands in agricultural areas},
+ journal = {Remote Sensing of Environment},
+ volume = {319},
+ eid = {114612},
+ year = {2025},
+ issn = {0034-4257},
+ doi = {https://doi.org/10.1016/j.rse.2025.114612},
+ url = {https://www.sciencedirect.com/science/article/pii/S0034425725000161},
+}
+```
